@@ -1,0 +1,13 @@
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "example"
+path = "src/main.rs"
+
+[dependencies]
+brass_engine = { path = "../Brass_Engine" }
+pollster = "0.3"
+env_logger = "0.11"

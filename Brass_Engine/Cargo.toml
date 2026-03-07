@@ -1,0 +1,24 @@
+[package]
+name = "brass_engine"
+version = "0.1.0"
+edition = "2021"
+description = "2D game engine with ECS, scripting and wgpu renderer"
+license = "MIT"
+repository = "https://github.com/CTRL-F0rg3/brass_engine"
+keywords = ["gamedev", "2d", "ecs", "wgpu", "renderer"]
+categories = ["game-engines"]
+
+[lib]
+name = "brass_engine"
+path = "src/lib.rs"
+
+
+[dependencies]
+wgpu = "22"
+winit = "0.30"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+log = "0.4"
+env_logger = "0.11"
