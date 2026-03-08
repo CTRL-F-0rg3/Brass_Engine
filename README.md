@@ -1,10 +1,10 @@
 # ⚙️ Brass Engine
 
-A 2D game engine for Rust built on **wgpu**, **winit**, and a lightweight **ECS** with a scriptable component system.
+A 2D/3D game engine for Rust built on **wgpu**, **winit**, with a lightweight **ECS**, scripting system, input handling and texture management.
 
 ```toml
 [dependencies]
-brass_engine = "0.1.0"
+brass_engine = "0.2.0"
 ```
 
 ---
@@ -12,22 +12,22 @@ brass_engine = "0.1.0"
 ## Quick Start
 
 ```rust
-use brass_engine::{run, AppConfig, World, Transform, RigidBody, SpriteComp, Vec2};
+use brass_engine::{run, AppConfig, World, Transform, SpriteComp, Vec2, Color, Key};
 
 fn main() {
     run(
         AppConfig { title: "My Game".into(), width: 1280, height: 720 },
 
-        |world| {
-            // Spawn entities once at startup
-            let player = world.spawn();
+        |world, _r2d, _r3d, _textures| {
+            let e = world.spawn();
             world
-                .add_transform(player, Transform::new(640.0, 360.0))
-                .add_sprite(player, SpriteComp::new(64.0, 64.0).with_color(0.2, 0.8, 1.0, 1.0));
+                .add_transform(e, Transform::new(640.0, 360.0))
+                .add_sprite(e, SpriteComp::new(64.0, 64.0).with_color(0.2, 0.8, 1.0, 1.0));
         },
 
-        |world, renderer, dt| {
-            // Called every frame — draw and update here
+        |world, renderer, _r3d, _textures, input, dt| {
+            if input.is_key_down(Key::Escape) { std::process::exit(0); }
+            renderer.draw_text("Hello Brass!", Vec2::new(10.0, 10.0), 20.0, Color::WHITE);
         },
     );
 }
@@ -38,7 +38,10 @@ fn main() {
 ## Table of Contents
 
 - [App Setup](#app-setup)
+- [Input System](#input-system)
 - [Renderer 2D](#renderer-2d)
+- [Renderer 3D](#renderer-3d)
+- [Texture Manager](#texture-manager)
 - [ECS — World & Entities](#ecs--world--entities)
 - [Components](#components)
 - [Scripts](#scripts)
@@ -58,26 +61,113 @@ run(
         width:  1280,
         height: 720,
     },
-    |world| {
-        // on_start — runs once after GPU init
-        // spawn your entities here
+
+    // on_start — runs once after GPU init
+    |world, renderer2d, renderer3d, textures| {
+        // spawn entities, load textures, upload meshes
     },
-    |world, renderer, dt| {
-        // on_update — runs every frame
+
+    // on_update — runs every frame
+    |world, renderer2d, renderer3d, textures, input, dt| {
         // dt = delta time in seconds (f32)
     },
 );
 ```
 
-`on_start` gives you `&mut World`.  
-`on_update` gives you `&mut World`, `&mut Renderer2D`, and `dt: f32`.
+---
+
+## Input System
+
+`Input` jest dostępny jako szósty argument w `on_update`. To jedyne miejsce gdzie możesz go odczytać — skrypty (`Script::on_update`) dostają tylko `(entity, world, dt)`, dlatego sterowanie najlepiej obsługiwać w `on_update` i aplikować przez komponenty (`RigidBody`, `Transform`).
+
+```rust
+run(
+    AppConfig { .. },
+    |world, r2d, r3d, textures| { /* on_start */ },
+    |world, r2d, r3d, textures, input, dt| {
+        // Ruch gracza przez RigidBody
+        if let Some(player) = world.find_by_tag("player") {
+            let dir = input.axis2d(Key::KeyA, Key::KeyD, Key::KeyW, Key::KeyS);
+            if let Some(rb) = world.get_rigidbody_mut(player) {
+                rb.velocity = dir * 300.0;
+            }
+        }
+
+        // Jednorazowa akcja
+        if let Some(player) = world.find_by_tag("player") {
+            if input.is_key_pressed(Key::Space) {
+                if let Some(rb) = world.get_rigidbody_mut(player) {
+                    rb.apply_impulse(Vec2::new(0.0, -500.0));
+                }
+            }
+        }
+    },
+);
+```
+
+### Klawiatura
+
+```rust
+input.is_key_down(Key::KeyW)         // wciśnięty (ciągłe, co klatkę)
+input.is_key_pressed(Key::Space)     // wciśnięty tylko w tej klatce
+input.is_key_released(Key::KeyE)     // puszczony tylko w tej klatce
+```
+
+### Axis helpers
+
+```rust
+// -1.0 / 0.0 / 1.0
+let x: f32 = input.axis(Key::KeyA, Key::KeyD);
+
+// Vec2 — WASD lub strzałki
+let dir: Vec2 = input.axis2d(
+    Key::KeyA, Key::KeyD,   // lewo / prawo
+    Key::KeyW, Key::KeyS,   // góra / dół
+);
+// rb.velocity = dir * speed;
+```
+
+### Mysz
+
+```rust
+input.is_mouse_down(MouseButton::Left)      // przytrzymany
+input.is_mouse_pressed(MouseButton::Right)  // kliknięty w tej klatce
+input.is_mouse_released(MouseButton::Left)  // puszczony w tej klatce
+
+input.mouse_position()  // Vec2 — pozycja kursora w pikselach
+input.mouse_delta()     // Vec2 — ruch od ostatniej klatki (FPS kamera)
+input.scroll()          // f32  — kółko myszy (+ góra, - dół)
+```
+
+### Przykład: kamera FPS myszą
+
+```rust
+if input.is_mouse_down(MouseButton::Right) {
+    let delta = input.mouse_delta();
+    let cam   = &mut renderer3d.camera;
+    let dir   = (cam.target - cam.position).normalize();
+    let right = dir.cross(Vec3::Y).normalize();
+    let rot_y = Mat4::from_rotation_y(-delta.x * 0.003);
+    let rot_p = Mat4::from_axis_angle(right, -delta.y * 0.003);
+    let off   = cam.position - cam.target;
+    cam.position = cam.target + rot_p.transform_vector3(rot_y.transform_vector3(off));
+}
+
+let zoom = input.scroll();
+if zoom != 0.0 {
+    let dir = (renderer3d.camera.target - renderer3d.camera.position).normalize();
+    renderer3d.camera.position += dir * zoom * 0.5;
+}
+```
+
+Pełna lista klawiszy: każdy wariant z [`winit::keyboard::KeyCode`](https://docs.rs/winit/latest/winit/keyboard/enum.KeyCode.html) działa jako `Key::*`.
 
 ---
 
 ## Renderer 2D
 
-The renderer collects draw calls every frame and flushes them in a single GPU batch.  
-Call draw functions inside `on_update` or from scripts.
+The 2D renderer collects all draw calls and flushes them in a single GPU batch per frame.  
+It renders **on top of** the 3D scene automatically.
 
 ### Sprites & Quads
 
@@ -85,19 +175,19 @@ Call draw functions inside `on_update` or from scripts.
 use brass_engine::{Sprite, Color, Vec2};
 
 // Colored quad
-renderer.draw_sprite(
+renderer2d.draw_sprite(
     Sprite::new(Vec2::new(200.0, 200.0), Vec2::new(64.0, 64.0))
         .with_color(Color::RED)
-        .with_rotation(0.5)          // radians
-        .with_z(0.8),                // draw order — 0.0 back, 1.0 front
+        .with_rotation(0.5)           // radians
+        .with_z(0.8),                 // draw order: 0.0 = back, 1.0 = front
 );
 
 // Textured sprite
-let tex_id = renderer.load_texture_bytes(ctx, include_bytes!("player.png"));
-renderer.draw_sprite(
+let id = textures.load_bytes(&ctx.device, &ctx.queue, include_bytes!("hero.png"), "hero");
+renderer2d.draw_sprite(
     Sprite::new(pos, size)
-        .with_texture(tex_id)
-        .with_uv(0.0, 0.0, 0.5, 1.0), // UV rect for sprite sheets
+        .with_texture(id)
+        .with_uv(0.0, 0.0, 0.5, 1.0),  // UV rect for sprite sheets
 );
 ```
 
@@ -105,59 +195,141 @@ renderer.draw_sprite(
 
 ```rust
 // Line
-renderer.draw_line(
-    Vec2::new(0.0, 0.0),
-    Vec2::new(400.0, 400.0),
-    2.0,          // thickness in pixels
-    Color::WHITE,
-);
+renderer2d.draw_line(start, end, thickness, Color::WHITE);
 
 // Filled rectangle
-renderer.draw_rect(Vec2::new(100.0, 100.0), Vec2::new(200.0, 80.0), Color::CYAN, true);
+renderer2d.draw_rect(Vec2::new(100.0, 100.0), Vec2::new(200.0, 80.0), Color::CYAN, true);
 
 // Rectangle outline with custom thickness
-renderer.draw_rect_ex(Vec2::new(100.0, 100.0), Vec2::new(200.0, 80.0), Color::WHITE, false, 3.0);
+renderer2d.draw_rect_ex(pos, size, Color::WHITE, false, 3.0);
 
-// Circle (32 segments by default)
-renderer.draw_circle(Vec2::new(640.0, 360.0), 80.0, Color::MAGENTA);
+// Circle — 32 segments default
+renderer2d.draw_circle(Vec2::new(640.0, 360.0), 80.0, Color::MAGENTA);
 
-// Circle with custom segment count
-renderer.draw_circle_ex(Vec2::new(640.0, 360.0), 80.0, Color::BLUE, 64);
-```
+// Circle — custom segments
+renderer2d.draw_circle_ex(center, radius, Color::BLUE, 64);
 
-### Text
-
-```rust
-// Placeholder — renders colored rectangles per character
-// Font rendering (fontdue / ab_glyph) planned for a future release
-renderer.draw_text("Hello World", Vec2::new(10.0, 10.0), 20.0, Color::WHITE);
+// Text (placeholder — font rendering planned)
+renderer2d.draw_text("Hello!", Vec2::new(10.0, 10.0), 20.0, Color::WHITE);
 ```
 
 ### Color
 
 ```rust
-Color::WHITE
-Color::BLACK
-Color::RED
-Color::GREEN
-Color::BLUE
-Color::YELLOW
-Color::CYAN
-Color::MAGENTA
+Color::WHITE | BLACK | RED | GREEN | BLUE | YELLOW | CYAN | MAGENTA
 
-Color::rgba(0.2, 0.8, 1.0, 1.0)   // r, g, b, a — range 0.0–1.0
-Color::hex(0xFF8C00)                // hex RGB
+Color::rgba(0.2, 0.8, 1.0, 1.0)   // r, g, b, a  — range 0.0–1.0
+Color::hex(0xFF8C00)                // RGB hex
+```
+
+---
+
+## Renderer 3D
+
+Blinn-Phong shading with directional light, perspective camera, and per-mesh materials.
+
+```rust
+use brass_engine::{Mesh, Material, Camera3D, DirectionalLight, Vec3, Mat4};
+
+// on_start — upload mesh once
+let cube_id = renderer3d.upload_mesh(ctx, &Mesh::cube());
+let plane_id = renderer3d.upload_mesh(ctx, &Mesh::plane(10.0));
+
+// Set camera
+renderer3d.camera = Camera3D::new(
+    Vec3::new(0.0, 3.0, 6.0),  // position
+    Vec3::ZERO,                  // target
+);
+renderer3d.camera.fov_y = 60.0; // degrees
+renderer3d.camera.near  = 0.1;
+renderer3d.camera.far   = 1000.0;
+
+// Set directional light
+renderer3d.light = DirectionalLight::new(
+    Vec3::new(-0.3, -1.0, -0.5),  // direction
+    Vec3::ONE,                      // color (white)
+    1.0,                            // intensity
+);
+
+// on_update — draw meshes
+renderer3d.draw_mesh(
+    cube_id,
+    Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+    Material::color(1.0, 0.3, 0.2),
+);
+
+renderer3d.draw_mesh(
+    plane_id,
+    Mat4::IDENTITY,
+    Material::textured(texture_id),
+);
+```
+
+### Built-in Meshes
+
+```rust
+Mesh::cube()          // unit cube centered at origin
+Mesh::plane(size)     // flat XZ plane
+```
+
+### Material
+
+```rust
+Material::color(r, g, b)          // solid color
+Material::textured(texture_id)     // uses texture from TextureManager
+
+// Fine control
+Material { albedo, texture_id, metallic, roughness }
+```
+
+### Camera3D
+
+```rust
+Camera3D::new(position, target)
+camera.position   // Vec3
+camera.target     // Vec3
+camera.up         // Vec3 (default Y)
+camera.fov_y      // f32 degrees
+camera.near       // f32
+camera.far        // f32
+camera.view_matrix()          // Mat4
+camera.proj_matrix(aspect)    // Mat4
+camera.view_proj(aspect)      // Mat4 — combined
+```
+
+---
+
+## Texture Manager
+
+Central GPU texture cache — each image loaded once, referenced by `u64` ID.
+
+```rust
+// Load from embedded bytes (PNG/JPG)
+let id = textures.load_bytes(
+    &ctx.device, &ctx.queue,
+    include_bytes!("assets/hero.png"),
+    "hero",   // cache key — same key = same ID returned
+);
+
+// Load from raw RGBA bytes
+let id = textures.load_raw(&ctx.device, &ctx.queue, &rgba_bytes, width, height);
+
+// Use in 2D sprite
+sprite.with_texture(id);
+
+// Use in 3D material
+Material::textured(id);
+
+// Free from GPU
+textures.remove(id);
 ```
 
 ---
 
 ## ECS — World & Entities
 
-Every game object is an `Entity` — a lightweight `u64` handle.  
-Components are stored in `World` and accessed by entity ID.
-
 ```rust
-// Spawn an entity
+// Spawn
 let e = world.spawn();
 
 // Add components (chainable)
@@ -167,27 +339,23 @@ world
     .add_sprite(e, SpriteComp::new(64.0, 64.0))
     .add_tag(e, "player");
 
-// Get components
-let t:  Option<&Transform>     = world.get_transform(e);
-let rb: Option<&mut RigidBody> = world.get_rigidbody_mut(e);
+// Access components
+let t:  Option<&Transform>      = world.get_transform(e);
+let rb: Option<&mut RigidBody>  = world.get_rigidbody_mut(e);
 let s:  Option<&mut SpriteComp> = world.get_sprite_mut(e);
 
-// Move entity directly (no physics)
+// Find by tag
+let player: Option<Entity> = world.find_by_tag("player");
+let enemies: Vec<Entity>   = world.find_all_by_tag("enemy");
+
+// Move without physics
 world.translate(e, Vec2::new(5.0, 0.0));
 
-// Distance between two entities
+// Distance between entities
 let dist: Option<f32> = world.distance(a, b);
 
-// Find by tag
-let player: Option<Entity>  = world.find_by_tag("player");
-let enemies: Vec<Entity>    = world.find_all_by_tag("enemy");
-
-// Schedule entity for removal (safe to call inside scripts)
-// Entity is removed at end of frame, not immediately
+// Schedule removal — safe to call inside scripts, executes end of frame
 world.destroy(e);
-
-// Get all living entities
-let all: Vec<Entity> = world.entities();
 ```
 
 ---
@@ -195,130 +363,86 @@ let all: Vec<Entity> = world.entities();
 ## Components
 
 ### Transform
-
-Position, scale and rotation of an entity.
-
 ```rust
 Transform::new(x, y)
-    .with_scale(2.0, 2.0)   // default: (1.0, 1.0)
-    .with_rotation(0.5)      // radians, default: 0.0
+    .with_scale(2.0, 2.0)
+    .with_rotation(0.5)   // radians
 
-// Fields
 transform.position  // Vec2
 transform.scale     // Vec2
-transform.rotation  // f32 radians
+transform.rotation  // f32
 ```
 
 ### RigidBody
-
-Physics data — velocity, acceleration, damping.
-
 ```rust
 RigidBody::new()
-    .with_velocity(200.0, 0.0)  // initial velocity
-    .with_damping(0.05)          // 0.0 = no drag, 1.0 = instant stop
-    .stationary()                // dynamic = false — physics won't move it
+    .with_velocity(200.0, 0.0)
+    .with_damping(0.05)       // 0.0 = no drag, 1.0 = instant stop
+    .stationary()             // won't be moved by physics
 
-// Impulse — instant velocity change (one frame)
-rigidbody.apply_impulse(Vec2::new(0.0, -500.0));
+rigidbody.apply_impulse(Vec2::new(0.0, -500.0))  // one-frame push
+rigidbody.apply_force(Vec2::new(0.0, 9.81))       // continuous (resets each frame)
 
-// Force — adds to acceleration (continuous, resets each frame)
-rigidbody.apply_force(Vec2::new(0.0, 9.81));
-
-// Direct access
-rigidbody.velocity     // Vec2
-rigidbody.acceleration // Vec2
-rigidbody.damping      // f32
-rigidbody.dynamic      // bool
+rigidbody.velocity      // Vec2
+rigidbody.acceleration  // Vec2
+rigidbody.damping       // f32
+rigidbody.dynamic       // bool
 ```
 
 ### SpriteComp
-
-Visual data — links an entity to the renderer.
-
 ```rust
 SpriteComp::new(width, height)
-    .with_color(r, g, b, a)      // RGBA 0.0–1.0, default: white
-    .with_texture(texture_id)    // u64 from load_texture_bytes()
-    .with_z(0.5)                 // draw order 0.0 back – 1.0 front
+    .with_color(r, g, b, a)
+    .with_texture(texture_id)
+    .with_z(0.5)             // draw order 0.0–1.0
 
-// Fields
-sprite.visible     // bool — set false to hide without destroying
-sprite.size        // Vec2
-sprite.color       // [f32; 4]
-sprite.texture_id  // Option<u64>
-sprite.uv_rect     // [f32; 4]
+sprite.visible    // bool — hide without destroying
+sprite.size       // Vec2
+sprite.color      // [f32; 4]
+sprite.texture_id // Option<u64>
 ```
 
 ### Tag
-
-String label for finding entities by name.
-
 ```rust
 world.add_tag(e, "enemy");
-world.find_by_tag("enemy");       // first match
-world.find_all_by_tag("enemy");   // all matches
+world.find_by_tag("enemy");
+world.find_all_by_tag("enemy");
 ```
 
 ---
 
 ## Scripts
 
-Scripts attach behavior to entities. Two styles are supported.
-
-### Closure Script — simple, stateless
-
+### Closure — simple, no state
 ```rust
 world.add_script_fn(entity, |entity, world, dt| {
-    // Runs every frame for this entity
     if let Some(rb) = world.get_rigidbody_mut(entity) {
         rb.apply_impulse(Vec2::new(100.0 * dt, 0.0));
     }
 });
 ```
 
-### Trait Script — complex, with own state
-
+### Trait — complex, with own state
 ```rust
 use brass_engine::{Script, Entity, World};
 
-struct PlayerController {
-    speed:     f32,
-    jump_held: bool,
-}
+struct Enemy { hp: i32, speed: f32 }
 
-impl Script for PlayerController {
+impl Script for Enemy {
     fn on_start(&mut self, entity: Entity, world: &mut World) {
-        // Called once when entity first runs
-        if let Some(rb) = world.get_rigidbody_mut(entity) {
-            rb.velocity = Vec2::new(self.speed, 0.0);
-        }
+        // runs once on first frame
     }
-
     fn on_update(&mut self, entity: Entity, world: &mut World, dt: f32) {
-        // Called every frame
+        // runs every frame
     }
-
     fn on_destroy(&mut self, entity: Entity, world: &mut World) {
-        // Called when entity is destroyed
+        // runs when entity is destroyed
     }
 }
 
-// Attach to entity
-use brass_engine::ScriptComponent;
-
 let mut sc = ScriptComponent::new();
-sc.add(PlayerController { speed: 300.0, jump_held: false });
-world.add_script_component(entity, sc);
-```
-
-### Multiple scripts per entity
-
-```rust
-let mut sc = ScriptComponent::new();
-sc.add(PlayerController { speed: 300.0, jump_held: false });
-sc.add(HealthSystem { hp: 100 });
-sc.add_fn(|e, world, dt| { /* closure alongside trait scripts */ });
+sc.add(Enemy { hp: 100, speed: 150.0 });
+sc.add_fn(|e, world, dt| { /* mix trait + closure */ });
 world.add_script_component(entity, sc);
 ```
 
@@ -326,41 +450,38 @@ world.add_script_component(entity, sc);
 
 ## Physics
 
-Physics runs automatically each frame on every entity that has both a `Transform` and a `RigidBody`.
+Runs automatically each frame on entities with both `Transform` and `RigidBody`:
 
 ```
 velocity     += acceleration * dt
 position     += velocity * dt
 velocity     *= (1.0 - damping)
-acceleration  = Vec2::ZERO   ← reset each frame
+acceleration  = Vec2::ZERO    ← reset each frame
 ```
 
-Set `rigidbody.dynamic = false` to make an entity static — it won't be moved by the physics system.
+Set `rigidbody.dynamic = false` for static entities.
 
 ---
 
 ## Systems — Execution Order
 
-Each frame runs in this fixed order automatically:
+Each frame runs automatically in this order:
 
 ```
-1. script_system     — on_start (once) + on_update for all ScriptComponents
-2. physics_system    — integrate velocity → position
-3. on_update         — your callback (extra draw calls, game logic)
-4. render_sync_system — write Transform + SpriteComp to Renderer2D
-5. renderer.render() — GPU flush
-6. cleanup_system    — remove entities queued with world.destroy()
+1. script_system      — on_start (once) + on_update for all ScriptComponents
+2. physics_system     — integrate velocity → position
+3. on_update callback — your game logic + extra draw calls
+4. render_sync_system — ECS Transform + SpriteComp → Renderer2D
+5. Renderer3D.render  — 3D scene (clears screen)
+6. Renderer2D.render  — 2D overlay on top of 3D
+7. cleanup_system     — remove entities from world.destroy()
+8. input.flush()      — clear single-frame input states
 ```
 
-You can also call the systems manually if you need a custom loop:
+You can also call systems manually:
 
 ```rust
 use brass_engine::{script_system, physics_system, render_sync_system, cleanup_system};
-
-script_system(&mut world, dt);
-physics_system(&mut world, dt);
-render_sync_system(&world, &mut renderer);
-cleanup_system(&mut world);
 ```
 
 ---
