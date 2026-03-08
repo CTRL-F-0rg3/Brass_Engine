@@ -710,3 +710,49 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return tex_color * in.color;
 }
 "#;
+
+// ── Render do zewnętrznego TextureView (używane gdy 3D renderuje pierwszy) ────
+impl Renderer2D {
+    pub fn render_to_view(
+        &mut self,
+        ctx:  &super::context::RenderContext,
+        view: &wgpu::TextureView,
+    ) -> Result<(), wgpu::SurfaceError> {
+        if !self.vertices.is_empty() {
+            ctx.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+            ctx.queue.write_buffer(&self.index_buffer,  0, bytemuck::cast_slice(&self.indices));
+        }
+
+        let mut encoder = ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("2D Overlay Encoder") }
+        );
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("2D Overlay Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // LoadOp::Load — nie czyść, nałóż na 3D
+                        load:  wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            if !self.vertices.is_empty() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                self.draw_batches(&mut pass);
+            }
+        }
+
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        self.vertices.clear();
+        self.indices.clear();
+        Ok(())
+    }
+}
