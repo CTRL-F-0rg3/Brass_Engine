@@ -347,6 +347,13 @@ impl Renderer3D {
         id
     }
 
+    /// Uploaduj mesh mając tylko &wgpu::Device — przydatne w on_start.
+    pub fn upload_mesh_device(&mut self, device: &wgpu::Device, mesh: &Mesh) -> u64 {
+        let id = self.next_mesh; self.next_mesh += 1;
+        self.meshes.insert(id, GpuMesh::upload(device, mesh));
+        id
+    }
+
     pub fn draw_mesh(&mut self, mesh_id: u64, transform: Mat4, material: Material) {
         self.calls.push(DrawCall3D { mesh_id, transform, material });
     }

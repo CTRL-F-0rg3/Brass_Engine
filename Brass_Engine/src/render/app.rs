@@ -38,7 +38,7 @@ impl Default for AppConfig {
 /// - `on_update` — `(world, renderer2d, renderer3d, textures, input, dt)` — logika + draw calls
 pub fn run<S, U>(config: AppConfig, on_start: S, on_update: U)
 where
-    S: FnOnce(&mut World, &mut Renderer2D, &mut Renderer3D, &mut TextureManager) + 'static,
+    S: FnOnce(&mut World, &mut Renderer2D, &mut Renderer3D, &mut TextureManager, &RenderContext) + 'static,
     U: FnMut(&mut World, &mut Renderer2D, &mut Renderer3D, &mut TextureManager, &Input, f32) + 'static,
 {
     let event_loop = EventLoop::new().unwrap();
@@ -72,7 +72,7 @@ struct BrassApp {
     world:     World,
     input:     Input,
     config:    AppConfig,
-    on_start:  Option<Box<dyn FnOnce(&mut World, &mut Renderer2D, &mut Renderer3D, &mut TextureManager)>>,
+    on_start:  Option<Box<dyn FnOnce(&mut World, &mut Renderer2D, &mut Renderer3D, &mut TextureManager, &RenderContext)>>,
     on_update: Box<dyn FnMut(&mut World, &mut Renderer2D, &mut Renderer3D, &mut TextureManager, &Input, f32)>,
     last_time: Instant,
 }
@@ -107,8 +107,7 @@ impl ApplicationHandler for BrassApp {
             let r2d      = self.r2d.as_mut().unwrap();
             let r3d      = self.r3d.as_mut().unwrap();
             let textures = self.textures.as_mut().unwrap();
-            let _ = ctx; // ctx dostępny jeśli potrzebny
-            start_fn(&mut self.world, r2d, r3d, textures);
+            start_fn(&mut self.world, r2d, r3d, textures, ctx);
         }
 
         self.last_time = Instant::now();
