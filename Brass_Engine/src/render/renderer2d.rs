@@ -20,7 +20,6 @@ const MAX_QUADS:    usize = 10_000;
 const MAX_VERTICES: usize = MAX_QUADS * 4;
 const MAX_INDICES:  usize = MAX_QUADS * 6;
 
-// Slot tekstury "biały 1×1" — fallback dla prymitywów bez tekstury
 const WHITE_TEXTURE_ID: u64 = 0;
 
 // ─── typy publiczne ────────────────────────────────────────────────────────────
@@ -65,19 +64,12 @@ impl Color {
 /// Deskryptor sprite'a — wszystko czego potrzebujesz do narysowania quada
 #[derive(Clone, Debug)]
 pub struct Sprite {
-    /// Pozycja centrum sprite'a w przestrzeni świata (piksele)
     pub position:   Vec2,
-    /// Rozmiar (szerokość, wysokość) w pikselach
     pub size:       Vec2,
-    /// Obrót w radianach
     pub rotation:   f32,
-    /// Kolor mnożący teksturę (tint); biały = bez modyfikacji
     pub color:      Color,
-    /// ID tekstury zwrócone przez `Renderer2D::load_texture`; None = kolorowy quad
     pub texture_id: Option<u64>,
-    /// UV rect: [u_min, v_min, u_max, v_max] — pozwala na sprite sheety
     pub uv_rect:    [f32; 4],
-    /// Warstwa głębokości dla sortowania (0.0 = tył, 1.0 = przód)
     pub z_order:    f32,
 }
 
@@ -139,10 +131,10 @@ struct Vertex2D {
 
 impl Vertex2D {
     const ATTRIBS: [VertexAttribute; 4] = vertex_attr_array![
-        0 => Float32x2,  // position
-        1 => Float32x2,  // uv
-        2 => Float32x4,  // color
-        3 => Float32x2,  // z + pad
+        0 => Float32x2,
+        1 => Float32x2,
+        2 => Float32x4,
+        3 => Float32x2,
     ];
 
     fn layout() -> VertexBufferLayout<'static> {
@@ -167,6 +159,7 @@ struct CameraUniform {
 struct GpuTexture {
     #[allow(dead_code)]
     texture:    Texture,
+    #[allow(dead_code)]
     view:       TextureView,
     bind_group: BindGroup,
 }
@@ -174,27 +167,22 @@ struct GpuTexture {
 // ─── Renderer2D ───────────────────────────────────────────────────────────────
 
 pub struct Renderer2D {
-    // pipeline
-    pipeline:          RenderPipeline,
-    vertex_buffer:     Buffer,
-    index_buffer:      Buffer,
-    uniform_buffer:    Buffer,
-    uniform_bind_group: BindGroup,
-    texture_bind_layout: BindGroupLayout,
+    pipeline:             RenderPipeline,
+    vertex_buffer:        Buffer,
+    index_buffer:         Buffer,
+    uniform_buffer:       Buffer,
+    uniform_bind_group:   BindGroup,
+    texture_bind_layout:  BindGroupLayout,
 
-    // CPU-side batch
     vertices: Vec<Vertex2D>,
     indices:  Vec<u32>,
 
-    // tekstury
     textures:    HashMap<u64, GpuTexture>,
     next_tex_id: u64,
 
-    // kolejka komend na dany frame
     commands: Vec<DrawCommand>,
 
-    // macierz ortho (aktualizowana przy resize)
-    camera: CameraUniform,
+    camera:   CameraUniform,
     viewport: (f32, f32),
 }
 
@@ -202,13 +190,11 @@ impl Renderer2D {
     pub fn new(ctx: &RenderContext) -> Self {
         let device = &ctx.device;
 
-        // ── shader WGSL ───────────────────────────────────────────────────────
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label:  Some("2D Shader"),
             source: ShaderSource::Wgsl(SHADER_2D.into()),
         });
 
-        // ── uniform bind group layout (camera) ────────────────────────────────
         let uniform_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label:   Some("Uniform BGL"),
             entries: &[BindGroupLayoutEntry {
@@ -223,7 +209,6 @@ impl Renderer2D {
             }],
         });
 
-        // ── texture bind group layout ─────────────────────────────────────────
         let texture_bind_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label:   Some("Texture BGL"),
             entries: &[
@@ -246,14 +231,12 @@ impl Renderer2D {
             ],
         });
 
-        // ── pipeline layout ───────────────────────────────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label:                Some("2D Pipeline Layout"),
             bind_group_layouts:   &[&uniform_layout, &texture_bind_layout],
             push_constant_ranges: &[],
         });
 
-        // ── render pipeline ───────────────────────────────────────────────────
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label:  Some("2D Pipeline"),
             layout: Some(&pipeline_layout),
@@ -280,13 +263,12 @@ impl Renderer2D {
                 cull_mode:          None,
                 ..Default::default()
             },
-            depth_stencil: None, // 2D nie potrzebuje depth buffer
+            depth_stencil: None,
             multisample:   MultisampleState::default(),
             multiview:     None,
             cache:         None,
         });
 
-        // ── bufory GPU ────────────────────────────────────────────────────────
         let vertex_buffer = device.create_buffer(&BufferDescriptor {
             label:              Some("2D VB"),
             size:               (MAX_VERTICES * std::mem::size_of::<Vertex2D>()) as u64,
@@ -321,7 +303,6 @@ impl Renderer2D {
             }],
         });
 
-        // ── biała tekstura fallback ────────────────────────────────────────────
         let mut renderer = Self {
             pipeline,
             vertex_buffer,
@@ -344,37 +325,30 @@ impl Renderer2D {
 
     // ── Publiczne API ─────────────────────────────────────────────────────────
 
-    /// Załaduj teksturę z bajtów PNG/JPG; zwraca ID do użycia w Sprite.
     pub fn load_texture_bytes(&mut self, ctx: &RenderContext, bytes: &[u8]) -> u64 {
         let img = image::load_from_memory(bytes)
             .expect("Nieprawidłowe dane obrazu")
             .to_rgba8();
         let (w, h) = img.dimensions();
-        let id = self.upload_texture(ctx, &img, w, h);
-        id
+        self.upload_texture(ctx, &img, w, h)
     }
 
-    /// Narysuj sprite (texturowany lub kolorowy quad).
     pub fn draw_sprite(&mut self, sprite: Sprite) {
         self.commands.push(DrawCommand::Quad(sprite));
     }
 
-    /// Narysuj linię.
     pub fn draw_line(&mut self, start: Vec2, end: Vec2, thickness: f32, color: Color) {
         self.commands.push(DrawCommand::Line { start, end, thickness, color });
     }
 
-    /// Narysuj prostokąt.
     pub fn draw_rect(&mut self, position: Vec2, size: Vec2, color: Color, filled: bool) {
         self.commands.push(DrawCommand::Rect { position, size, color, filled, thickness: 2.0 });
     }
 
-    /// Narysuj prostokąt z określoną grubością obramowania.
     pub fn draw_rect_ex(&mut self, position: Vec2, size: Vec2, color: Color, filled: bool, thickness: f32) {
         self.commands.push(DrawCommand::Rect { position, size, color, filled, thickness });
     }
 
-    /// Narysuj koło (aproksymacja wielokątem).
     pub fn draw_circle(&mut self, center: Vec2, radius: f32, color: Color) {
         self.commands.push(DrawCommand::Circle { center, radius, color, segments: 32 });
     }
@@ -383,36 +357,27 @@ impl Renderer2D {
         self.commands.push(DrawCommand::Circle { center, radius, color, segments });
     }
 
-    /// Narysuj tekst (placeholder — wymaga podpięcia fontu).
     pub fn draw_text(&mut self, text: &str, position: Vec2, size: f32, color: Color) {
         self.commands.push(DrawCommand::Text {
             text: text.to_string(), position, size, color,
         });
     }
 
-    /// Zaktualizuj macierz ortho po zmianie rozmiaru okna.
     pub fn resize(&mut self, ctx: &RenderContext) {
         let (w, h) = ctx.viewport();
         self.viewport = (w, h);
         self.camera.view_proj =
             Mat4::orthographic_rh(0.0, w, h, 0.0, -1.0, 1.0).to_cols_array_2d();
-        ctx.queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&self.camera),
-        );
+        ctx.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.camera));
     }
 
-    /// Wyrenderuj wszystkie zebrane komendy i wyślij na ekran.
+    /// Standalone render — pobiera własny frame (używaj gdy nie ma 3D).
     pub fn render(&mut self, ctx: &RenderContext) -> Result<(), SurfaceError> {
-        // Pobierz frame
         let output = ctx.surface.get_current_texture()?;
         let view   = output.texture.create_view(&TextureViewDescriptor::default());
 
-        // Buduj batch z komend
         self.flush_commands();
 
-        // Upload buforów
         if !self.vertices.is_empty() {
             ctx.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
             ctx.queue.write_buffer(&self.index_buffer,  0, bytemuck::cast_slice(&self.indices));
@@ -440,8 +405,6 @@ impl Renderer2D {
             if !self.vertices.is_empty() {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-
-                // Rysujemy partiami posortowanymi po teksturze
                 self.draw_batches(&mut pass);
             }
         }
@@ -449,7 +412,55 @@ impl Renderer2D {
         ctx.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
-        // Wyczyść batch
+        self.vertices.clear();
+        self.indices.clear();
+
+        Ok(())
+    }
+
+    /// Render na zewnętrzny TextureView — używany gdy 3D renderuje pierwszy
+    /// (app.rs: r3d.render → r2d.render_to_view z LoadOp::Load).
+    pub fn render_to_view(
+        &mut self,
+        ctx:  &RenderContext,
+        view: &wgpu::TextureView,
+    ) -> Result<(), SurfaceError> {
+        // ── FIX: przetwórz komendy → vertices przed sprawdzeniem czy coś jest ──
+        self.flush_commands();
+
+        if !self.vertices.is_empty() {
+            ctx.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+            ctx.queue.write_buffer(&self.index_buffer,  0, bytemuck::cast_slice(&self.indices));
+        }
+
+        let mut encoder = ctx.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("2D Overlay Encoder"),
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("2D Overlay Pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load:  LoadOp::Load, // nie czyść — nałóż na 3D
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            if !self.vertices.is_empty() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                self.draw_batches(&mut pass);
+            }
+        }
+
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+
         self.vertices.clear();
         self.indices.clear();
 
@@ -461,17 +472,14 @@ impl Renderer2D {
     fn flush_commands(&mut self) {
         let cmds: Vec<DrawCommand> = self.commands.drain(..).collect();
 
-        // Sortuj po z_order (głębokość) — stabilne
-        let mut sorted_cmds = cmds;
-        sorted_cmds.sort_by(|a, b| {
-            let za = cmd_z(a);
-            let zb = cmd_z(b);
-            za.partial_cmp(&zb).unwrap_or(std::cmp::Ordering::Equal)
+        let mut sorted = cmds;
+        sorted.sort_by(|a, b| {
+            cmd_z(a).partial_cmp(&cmd_z(b)).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        for cmd in sorted_cmds {
+        for cmd in sorted {
             match cmd {
-                DrawCommand::Quad(sprite)       => self.push_sprite(&sprite),
+                DrawCommand::Quad(s)   => self.push_sprite(&s),
                 DrawCommand::Line { start, end, thickness, color } =>
                     self.push_line(start, end, thickness, color),
                 DrawCommand::Rect { position, size, color, filled, thickness } =>
@@ -485,35 +493,26 @@ impl Renderer2D {
     }
 
     fn push_sprite(&mut self, sprite: &Sprite) {
-        let tex_id = sprite.texture_id.unwrap_or(WHITE_TEXTURE_ID);
-        let base   = self.vertices.len() as u32;
-
+        let base  = self.vertices.len() as u32;
         let [u0, v0, u1, v1] = sprite.uv_rect;
         let color = sprite.color.to_array();
         let z     = sprite.z_order;
+        let hw    = sprite.size.x * 0.5;
+        let hh    = sprite.size.y * 0.5;
 
-        // Corners relative to center, then rotate
-        let hw = sprite.size.x * 0.5;
-        let hh = sprite.size.y * 0.5;
         let corners = [
             Vec2::new(-hw, -hh),
             Vec2::new( hw, -hh),
             Vec2::new( hw,  hh),
             Vec2::new(-hw,  hh),
         ];
-        let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
-
+        let uvs = [[u0,v0],[u1,v0],[u1,v1],[u0,v1]];
         let (sin, cos) = sprite.rotation.sin_cos();
-        let rotated: Vec<[f32; 2]> = corners.iter().map(|c| {
+
+        for (i, c) in corners.iter().enumerate() {
             let rx = c.x * cos - c.y * sin + sprite.position.x;
             let ry = c.x * sin + c.y * cos + sprite.position.y;
-            [rx, ry]
-        }).collect();
-
-        let _ = tex_id; // TODO: per-draw-call bind group batching
-
-        for (i, pos) in rotated.iter().enumerate() {
-            self.vertices.push(Vertex2D { position: *pos, uv: uvs[i], color, z, _pad: 0.0 });
+            self.vertices.push(Vertex2D { position: [rx, ry], uv: uvs[i], color, z, _pad: 0.0 });
         }
         self.indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
     }
@@ -523,14 +522,9 @@ impl Renderer2D {
         let perp  = Vec2::new(-dir.y, dir.x) * (thickness * 0.5);
         let color = color.to_array();
         let base  = self.vertices.len() as u32;
+        let uvs   = [[0f32,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]];
 
-        let positions = [
-            start + perp, start - perp,
-            end   - perp, end   + perp,
-        ];
-        let uvs = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-
-        for (i, p) in positions.iter().enumerate() {
+        for (i, p) in [start+perp, start-perp, end-perp, end+perp].iter().enumerate() {
             self.vertices.push(Vertex2D { position: p.to_array(), uv: uvs[i], color, z: 0.9, _pad: 0.0 });
         }
         self.indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
@@ -538,10 +532,8 @@ impl Renderer2D {
 
     fn push_rect(&mut self, pos: Vec2, size: Vec2, color: Color, filled: bool, thickness: f32) {
         if filled {
-            let sprite = Sprite::new(pos + size * 0.5, size).with_color(color);
-            self.push_sprite(&sprite);
+            self.push_sprite(&Sprite::new(pos + size * 0.5, size).with_color(color));
         } else {
-            // 4 linie obramowania
             let (x, y, w, h) = (pos.x, pos.y, size.x, size.y);
             self.push_line(Vec2::new(x,   y),   Vec2::new(x+w, y),   thickness, color);
             self.push_line(Vec2::new(x+w, y),   Vec2::new(x+w, y+h), thickness, color);
@@ -555,53 +547,45 @@ impl Renderer2D {
         let base  = self.vertices.len() as u32;
         let step  = std::f32::consts::TAU / segments as f32;
 
-        // Centrum
         self.vertices.push(Vertex2D {
             position: center.to_array(), uv: [0.5, 0.5], color, z: 0.5, _pad: 0.0,
         });
-
         for i in 0..=segments {
-            let angle = i as f32 * step;
-            let x = center.x + radius * angle.cos();
-            let y = center.y + radius * angle.sin();
-            let u = (angle.cos() + 1.0) * 0.5;
-            let v = (angle.sin() + 1.0) * 0.5;
-            self.vertices.push(Vertex2D { position: [x, y], uv: [u, v], color, z: 0.5, _pad: 0.0 });
+            let a = i as f32 * step;
+            self.vertices.push(Vertex2D {
+                position: [center.x + radius * a.cos(), center.y + radius * a.sin()],
+                uv: [(a.cos() + 1.0) * 0.5, (a.sin() + 1.0) * 0.5],
+                color, z: 0.5, _pad: 0.0,
+            });
         }
-
         for i in 0..segments {
-            self.indices.extend_from_slice(&[base, base + 1 + i, base + 2 + i]);
+            self.indices.extend_from_slice(&[base, base+1+i, base+2+i]);
         }
     }
 
-    /// Placeholder tekstu — rysuje prostokąt z kolorem; docelowo fontdue/ab_glyph
     fn push_text_placeholder(&mut self, text: &str, position: Vec2, font_size: f32, color: Color) {
         let char_w = font_size * 0.6;
-        for (i, _c) in text.chars().enumerate() {
+        for (i, _) in text.chars().enumerate() {
             let x = position.x + i as f32 * (char_w + 1.0);
-            let sprite = Sprite::new(
-                Vec2::new(x + char_w * 0.5, position.y + font_size * 0.5),
-                Vec2::new(char_w, font_size),
-            ).with_color(color);
-            self.push_sprite(&sprite);
+            self.push_sprite(
+                &Sprite::new(
+                    Vec2::new(x + char_w * 0.5, position.y + font_size * 0.5),
+                    Vec2::new(char_w, font_size),
+                ).with_color(color)
+            );
         }
     }
 
     fn draw_batches<'a>(&'a self, pass: &mut RenderPass<'a>) {
-        // Rysujemy całość jednym batch call z białą teksturą
-        // TODO: per-texture batching gdy tekstury będą aktywne
-        let white_bg = self.textures.get(&WHITE_TEXTURE_ID)
-            .expect("Brak białej tekstury");
-
-        pass.set_bind_group(1, &white_bg.bind_group, &[]);
+        let white = self.textures.get(&WHITE_TEXTURE_ID).expect("Brak białej tekstury");
+        pass.set_bind_group(1, &white.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
     }
 
     fn create_white_texture(&mut self, ctx: &RenderContext) {
-        let white_pixel: [u8; 4] = [255, 255, 255, 255];
-        self.upload_texture_raw(ctx, &white_pixel, 1, 1, WHITE_TEXTURE_ID);
+        self.upload_texture_raw(ctx, &[255u8; 4], 1, 1, WHITE_TEXTURE_ID);
     }
 
     fn upload_texture(&mut self, ctx: &RenderContext, data: &[u8], w: u32, h: u32) -> u64 {
@@ -627,7 +611,10 @@ impl Renderer2D {
         });
 
         queue.write_texture(
-            ImageCopyTexture { texture: &texture, mip_level: 0, origin: Origin3d::ZERO, aspect: TextureAspect::All },
+            ImageCopyTexture {
+                texture: &texture, mip_level: 0,
+                origin: Origin3d::ZERO, aspect: TextureAspect::All,
+            },
             data,
             ImageDataLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
             Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -636,13 +623,13 @@ impl Renderer2D {
         let view = texture.create_view(&TextureViewDescriptor::default());
 
         let sampler = device.create_sampler(&SamplerDescriptor {
-            label:             Some("Brass Sampler"),
-            address_mode_u:    AddressMode::ClampToEdge,
-            address_mode_v:    AddressMode::ClampToEdge,
-            address_mode_w:    AddressMode::ClampToEdge,
-            mag_filter:        FilterMode::Linear,
-            min_filter:        FilterMode::Linear,
-            mipmap_filter:     FilterMode::Nearest,
+            label:          Some("Brass Sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter:     FilterMode::Linear,
+            min_filter:     FilterMode::Linear,
+            mipmap_filter:  FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -659,7 +646,7 @@ impl Renderer2D {
     }
 }
 
-// ── helpery ────────────────────────────────────────────────────────────────────
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
 fn cmd_z(cmd: &DrawCommand) -> f32 {
     match cmd {
@@ -668,30 +655,24 @@ fn cmd_z(cmd: &DrawCommand) -> f32 {
     }
 }
 
-// ── WGSL Shader ───────────────────────────────────────────────────────────────
+// ─── WGSL Shader ──────────────────────────────────────────────────────────────
 
 const SHADER_2D: &str = r#"
-// ── Uniforms ──────────────────────────────────────────────────────────────────
-struct Camera {
-    view_proj: mat4x4<f32>,
-}
+struct Camera { view_proj: mat4x4<f32> }
 @group(0) @binding(0) var<uniform> camera: Camera;
-
 @group(1) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(1) @binding(1) var s_diffuse: sampler;
 
-// ── Vertex ────────────────────────────────────────────────────────────────────
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv:       vec2<f32>,
     @location(2) color:    vec4<f32>,
-    @location(3) zpad:     vec2<f32>,  // x = z, y = pad
+    @location(3) zpad:     vec2<f32>,
 }
-
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
-    @location(0)       uv:       vec2<f32>,
-    @location(1)       color:    vec4<f32>,
+    @location(0) uv:    vec2<f32>,
+    @location(1) color: vec4<f32>,
 }
 
 @vertex
@@ -703,56 +684,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// ── Fragment ──────────────────────────────────────────────────────────────────
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(t_diffuse, s_diffuse, in.uv);
-    return tex_color * in.color;
+    return textureSample(t_diffuse, s_diffuse, in.uv) * in.color;
 }
 "#;
-
-// ── Render do zewnętrznego TextureView (używane gdy 3D renderuje pierwszy) ────
-impl Renderer2D {
-    pub fn render_to_view(
-        &mut self,
-        ctx:  &super::context::RenderContext,
-        view: &wgpu::TextureView,
-    ) -> Result<(), wgpu::SurfaceError> {
-        if !self.vertices.is_empty() {
-            ctx.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-            ctx.queue.write_buffer(&self.index_buffer,  0, bytemuck::cast_slice(&self.indices));
-        }
-
-        let mut encoder = ctx.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("2D Overlay Encoder") }
-        );
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("2D Overlay Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // LoadOp::Load — nie czyść, nałóż na 3D
-                        load:  wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-
-            if !self.vertices.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                self.draw_batches(&mut pass);
-            }
-        }
-
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-        self.vertices.clear();
-        self.indices.clear();
-        Ok(())
-    }
-}
