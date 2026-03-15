@@ -351,7 +351,7 @@ impl TileMap {
 
                 // Ręczne ustawienie z_order (Sprite::new nie ma buildera)
                 let mut s = sprite;
-                s.z_order = layer.z_order;
+                s.layer = layer.z_order as u8;
 
                 r2d.draw_sprite(s);
             }
