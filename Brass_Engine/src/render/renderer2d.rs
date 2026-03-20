@@ -475,21 +475,29 @@ fn cmd_layer(c: &Cmd) -> u8 {
 
 #[repr(C)] #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuLight {
-    pos:       [f32; 2],
-    radius:    f32,
-    intensity: f32,
-    color:     [f32; 4],
-}
+    pos:       [f32; 2],   //  8B
+    radius:    f32,        //  4B
+    intensity: f32,        //  4B
+    color:     [f32; 4],   // 16B
+}                          // = 32B total — matches WGSL Light struct
 
 const MAX_LIGHTS: usize = 32;
 
+// FIX: ambient zmieniony z [f32; 3] + _pad na [f32; 4] żeby zgadzał się
+// z WGSL vec3<f32> które w uniform buffer zajmuje 16B (wyrównanie do vec4).
+// Rust size_of: 32*32 + 4 + 12 = 1040 → z paddingiem WGSL = 1056.
+// [f32; 4] daje: 1024 + 4 + 12 = 1040 po stronie Rust,
+// ale WGSL liczy count(4) + pad(12) = 16, ambient vec3(12)+pad(4) = 16 → 1056.
+// Używamy [f32; 4] żeby bytemuck wysyłał dokładnie tyle bajtów co shader czeka.
 #[repr(C)] #[derive(Clone, Copy, Pod, Zeroable)]
 struct LightUniform {
-    lights:      [GpuLight; MAX_LIGHTS],
-    count:       u32,
-    ambient:     [f32; 3],
-    _pad:        f32,
-}
+    lights:  [GpuLight; MAX_LIGHTS],  // 32 * 32B = 1024B
+    count:   u32,                      //           4B
+    _pad0:   u32,                      //           4B  ← padding po count
+    _pad1:   u32,                      //           4B  ← padding
+    _pad2:   u32,                      //           4B  ← wyrównanie do 16B
+    ambient: [f32; 4],                 //          16B  ← vec3 + explicit pad
+}                                      // TOTAL:  1056B ✓
 
 // ─── Renderer2D ───────────────────────────────────────────────────────────────
 
@@ -663,8 +671,10 @@ impl Renderer2D {
         let light_data = LightUniform {
             lights:  [GpuLight { pos:[0.0;2], radius:0.0, intensity:0.0, color:[0.0;4] }; MAX_LIGHTS],
             count:   0,
-            ambient: [0.0; 3],
-            _pad:    0.0,
+            _pad0:   0,
+            _pad1:   0,
+            _pad2:   0,
+            ambient: [0.0; 4],
         };
         let light_ub = device.create_buffer_init(&util::BufferInitDescriptor {
             label: Some("Light Uniform"), contents: bytemuck::bytes_of(&light_data),
@@ -827,8 +837,12 @@ impl Renderer2D {
         let mut lu = LightUniform {
             lights:  [GpuLight { pos:[0.0;2], radius:0.0, intensity:0.0, color:[0.0;4] }; MAX_LIGHTS],
             count:   n as u32,
-            ambient: [self.ambient.r, self.ambient.g, self.ambient.b],
-            _pad:    0.0,
+            _pad0:   0,
+            _pad1:   0,
+            _pad2:   0,
+            // FIX: ambient jako [f32; 4] — czwarty element ignorowany przez shader,
+            // ale konieczny żeby bytemuck::bytes_of wysłał 1056B zamiast 1044B.
+            ambient: [self.ambient.r, self.ambient.g, self.ambient.b, 0.0],
         };
         for (i, l) in self.lights.iter().take(MAX_LIGHTS).enumerate() {
             lu.lights[i] = GpuLight {
@@ -982,7 +996,6 @@ impl Renderer2D {
     fn push_tilemap(&mut self, tm: &Tilemap) {
         let atlas_cols = tm.cols as f32;
         let fw = 1.0 / atlas_cols;
-        // Zakładamy kwadratowy atlas; jeśli nie — dodaj atlas_rows
         let fh = fw;
         let z  = tm.layer as f32 / 255.0;
 
@@ -1138,10 +1151,16 @@ struct Camera { view_proj: mat4x4<f32> }
 @group(1) @binding(1) var s_tex: sampler;
 
 struct Light { pos: vec2<f32>, radius: f32, intensity: f32, color: vec4<f32> }
+
+// FIX: ambient jako vec4<f32> — wyrównanie do 16B, zgadza się z [f32;4] po stronie Rust.
+// count + _pad0/1/2 wypełniają 16B przed ambient.
 struct Lights {
     lights:  array<Light, 32>,
     count:   u32,
-    ambient: vec3<f32>,
+    _pad0:   u32,
+    _pad1:   u32,
+    _pad2:   u32,
+    ambient: vec4<f32>,
 }
 @group(2) @binding(0) var<uniform> lights: Lights;
 
@@ -1162,8 +1181,8 @@ fn vs_main(v: VIn) -> VOut {
 fn fs_main(i: VOut) -> @location(0) vec4<f32> {
     let tex = textureSample(t_tex, s_tex, i.uv) * i.col;
 
-    // Lighting
-    var light_acc = lights.ambient;
+    // Lighting — używamy .xyz z vec4 ambient
+    var light_acc = lights.ambient.xyz;
     for (var li: u32 = 0u; li < lights.count; li++) {
         let l    = lights.lights[li];
         let dist = length(l.pos - i.wpos);
@@ -1184,7 +1203,16 @@ struct Camera { view_proj: mat4x4<f32> }
 @group(1) @binding(1) var s_tex: sampler;
 
 struct Light { pos: vec2<f32>, radius: f32, intensity: f32, color: vec4<f32> }
-struct Lights { lights: array<Light, 32>, count: u32, ambient: vec3<f32> }
+
+// FIX: spójny layout z głównym shaderem
+struct Lights {
+    lights:  array<Light, 32>,
+    count:   u32,
+    _pad0:   u32,
+    _pad1:   u32,
+    _pad2:   u32,
+    ambient: vec4<f32>,
+}
 @group(2) @binding(0) var<uniform> lights: Lights;
 
 struct VIn  { @location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>, @location(2) col: vec4<f32>, @location(3) zp: vec2<f32> }
